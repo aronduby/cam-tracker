@@ -1,0 +1,9 @@
+# Direct dependencies of kamtron_ptz.py and kamtron_track_motion.py.
+# Install with: pip install -r requirements.txt
+# (pip will automatically pull in each package's own sub-dependencies,
+# e.g. mipc-camera-client needs requests/pycryptodome/json5 -- those
+# don't need to be listed here.)
+
+mipc-camera-client==0.1.3
+pillow==12.3.0
+numpy==2.5.3
