@@ -19,3 +19,4 @@ __pycache__/
 
 # Local environment/secrets, if you ever add a .env file for credentials
 .env
+/myconfig.yaml

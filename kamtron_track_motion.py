@@ -35,7 +35,7 @@ IMPORTANT - you must calibrate --pan-min/--pan-max yourself:
        treat "home" as position 0 / the left edge of the range).
 
 Install dependencies first:
-    pip install mipc-camera-client pillow numpy
+    pip install mipc-camera-client pillow numpy pyyaml
 
 Usage:
     python3 kamtron_track_motion.py --host 192.168.1.180 --user admin \\
@@ -46,6 +46,17 @@ Usage:
     # re-adjusts tilt once running.
     python3 kamtron_track_motion.py --host 192.168.1.180 --user admin \\
         --password admin --pan-max 800 --y 150
+
+Config files:
+    All options can be loaded from a YAML file instead of the command
+    line (see myconfig.yaml.example for the option names and defaults):
+
+        python3 kamtron_track_motion.py --config myconfig.yaml
+
+    Any option also passed on the command line overrides the value from
+    the config file, e.g.:
+
+        python3 kamtron_track_motion.py --config myconfig.yaml --gain 200
 """
 
 import argparse
@@ -55,14 +66,16 @@ import time
 
 try:
     from mipc_camera_client import MipcCameraClient
-except ImportError:
-    sys.exit("Missing dependency. Install it first with:\n    pip install mipc-camera-client")
-
-try:
     from PIL import Image
     import numpy as np
+    import yaml
 except ImportError:
-    sys.exit("Missing dependency. Install it first with:\n    pip install pillow numpy")
+    sys.exit("Missing dependency. Install it first with:\n    pip install -r requirements.txt")
+
+
+# Options that configure config-file handling itself, not tracking
+# behavior -- these are never read from a config file.
+CONFIG_META_DESTS = ("help", "config")
 
 
 def grab_gray_array(cam: "MipcCameraClient", size):
@@ -95,17 +108,24 @@ def find_motion_offset(prev: "np.ndarray", curr: "np.ndarray", pixel_threshold: 
     return offset
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description="Pan a Kamtron/MIPC camera to follow motion")
-    parser.add_argument("--host", required=True)
-    parser.add_argument("--user", required=True)
-    parser.add_argument("--password", required=True)
+
+    parser.add_argument("--config", metavar="FILE",
+                         help="Load option values from this YAML file. Options also given "
+                              "directly on the command line take precedence over values "
+                              "from the file.")
+
+    parser.add_argument("--host", help="Camera IP/hostname (required, directly or via --config)")
+    parser.add_argument("--user", help="Camera login username (required, directly or via --config)")
+    parser.add_argument("--password", help="Camera login password (required, directly or via --config)")
 
     parser.add_argument("--pan-min", type=int, default=0,
                          help="Leftmost allowed pan position, in control_ptz units (default 0 = home)")
-    parser.add_argument("--pan-max", type=int, required=True,
+    parser.add_argument("--pan-max", type=int,
                          help="Rightmost allowed pan position, in control_ptz units -- "
-                              "calibrate this yourself, see the module docstring")
+                              "calibrate this yourself, see the module docstring "
+                              "(required, directly or via --config)")
     parser.add_argument("--y", type=int, default=0,
                          help="Tilt (vertical) position to move to on startup, relative to home, "
                               "in control_ptz units (default 0 = don't tilt away from home). "
@@ -140,17 +160,71 @@ def main():
                               "(default 10)")
 
     parser.add_argument("--no-home", action="store_true",
-                         help="Don't send the camera home at startup, and don't move to "
-                              "--pan-min/--y either -- assume it's already positioned correctly "
-                              "and skip straight to tracking")
+                         help="Don't send the camera home at startup, and don't move to the "
+                              "initial (center, --y) position either -- assume it's already "
+                              "positioned correctly and skip straight to tracking")
     parser.add_argument("--home-settle-time", type=float, default=6.0,
                          help="Seconds to wait after the startup home command before starting to "
                               "track (a full-range move takes longer than a small nudge)")
     parser.add_argument("--initial-position-settle-time", type=float, default=3.0,
-                         help="Seconds to wait after moving to the initial (--pan-min, --y) "
-                              "position before starting to track (default 3.0)")
+                         help="Seconds to wait after moving to the initial position (center of "
+                              "[--pan-min, --pan-max], --y) before starting to track (default 3.0)")
 
+    return parser
+
+
+def configurable_actions(parser):
+    """All argparse actions that can be set from a config file."""
+    return [a for a in parser._actions if a.dest not in CONFIG_META_DESTS]
+
+
+def load_config_file(parser, path):
+    """Read a YAML config file and return a dict of {argparse dest: value}."""
+    try:
+        with open(path, "r") as f:
+            data = yaml.safe_load(f)
+    except FileNotFoundError:
+        sys.exit(f"Config file not found: {path}")
+    except yaml.YAMLError as e:
+        sys.exit(f"Could not parse config file {path}: {e}")
+
+    data = data or {}
+    if not isinstance(data, dict):
+        sys.exit(f"Config file {path} must contain a YAML mapping of option names to values")
+
+    actions_by_key = {a.dest.replace("_", "-"): a for a in configurable_actions(parser)}
+
+    file_values = {}
+    for key, value in data.items():
+        action = actions_by_key.get(str(key).replace("_", "-"))
+        if action is None:
+            sys.exit(f"Unknown option '{key}' in {path} "
+                      f"(expected one of: {', '.join(sorted(actions_by_key))})")
+        # YAML already parses plain ints/floats/bools natively, but coerce
+        # in case a value was quoted as a string (e.g. pan-max: "800").
+        if isinstance(value, str) and callable(action.type):
+            value = action.type(value)
+        file_values[action.dest] = value
+
+    return file_values
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
+
+    if args.config:
+        file_values = load_config_file(parser, args.config)
+        parser.set_defaults(**file_values)
+        args = parser.parse_args()  # reparse so explicit CLI flags still win over the file
+
+    missing = [flag for flag, val in (
+        ("--host", args.host), ("--user", args.user),
+        ("--password", args.password), ("--pan-max", args.pan_max),
+    ) if val is None or val == ""]
+    if missing:
+        sys.exit(f"Missing required argument(s): {', '.join(missing)} "
+                  "(pass them on the command line, or put them in a --config file)")
 
     if args.pan_max <= args.pan_min:
         sys.exit("--pan-max must be greater than --pan-min")
@@ -161,22 +235,20 @@ def main():
     cam = MipcCameraClient(args.host)
     cam.login(args.user, args.password)
 
-    current_x = args.pan_min
+    center_x = (args.pan_min + args.pan_max) // 2
+    current_x = center_x
 
     if not args.no_home:
         print("Homing camera to leftmost position...")
         cam.control_ptz(tilt_x=-360, tilt_y=-360, speed_x=args.speed_x, speed_y=args.speed_y)
         time.sleep(args.home_settle_time)
 
-        print(f"Moving to initial position (pan={args.pan_min}, y={args.y})...")
-        cam.control_ptz(tilt_x=args.pan_min, tilt_y=args.y, speed_x=args.speed_x, speed_y=args.speed_y)
+        print(f"Moving to initial position (pan={center_x}, y={args.y})...")
+        cam.control_ptz(tilt_x=center_x, tilt_y=args.y, speed_x=args.speed_x, speed_y=args.speed_y)
         time.sleep(args.initial_position_settle_time)
-
-        current_x = args.pan_min
     else:
         print(f"Skipping home step, assuming camera is already at pan position {current_x} and y={args.y}")
 
-    center_x = (args.pan_min + args.pan_max) // 2
     print(f"Tracking motion. Pan range [{args.pan_min}, {args.pan_max}], center={center_x}. Ctrl+C to stop.")
 
     prev = grab_gray_array(cam, frame_size)
