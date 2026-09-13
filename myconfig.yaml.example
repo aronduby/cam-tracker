@@ -48,6 +48,10 @@ min-motion-fraction: 0.02
 # Per-pixel brightness change (0-255) to count as 'changed' (default 25)
 pixel-threshold: 25.0
 
+# Ignore pixels brighter than this (0-255) when detecting motion, to filter out
+# sun/light glare and other overexposed areas (default 200)
+max-brightness: 200.0
+
 # Seconds between snapshots while watching for motion (default 0.5)
 poll-interval: 0.5
 

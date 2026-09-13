@@ -83,7 +83,8 @@ def grab_gray_array(cam: "MipcCameraClient", size):
     return np.asarray(img, dtype=np.float32)
 
 
-def find_motion_offset(prev: "np.ndarray", curr: "np.ndarray", pixel_threshold: float, min_motion_fraction: float):
+def find_motion_offset(prev: "np.ndarray", curr: "np.ndarray", pixel_threshold: float,
+                        min_motion_fraction: float, max_brightness: float):
     """
     Compare two grayscale frames and, if there's enough of a change,
     return a normalized horizontal offset in [-1.0, 1.0] for where the
@@ -91,7 +92,7 @@ def find_motion_offset(prev: "np.ndarray", curr: "np.ndarray", pixel_threshold: 
     Returns None if there isn't enough motion to act on.
     """
     diff = np.abs(curr - prev)
-    mask = diff > pixel_threshold
+    mask = (diff > pixel_threshold) & (curr <= max_brightness)
 
     total_pixels = mask.size
     motion_pixels = int(mask.sum())
@@ -144,6 +145,9 @@ def build_parser():
                               "not noise (default 0.02 = 2%% of pixels)")
     parser.add_argument("--pixel-threshold", type=float, default=25.0,
                          help="Per-pixel brightness change (0-255) to count as 'changed' (default 25)")
+    parser.add_argument("--max-brightness", type=float, default=200.0,
+                         help="Ignore pixels brighter than this (0-255) when detecting motion, "
+                              "to filter out sun/light glare and other overexposed areas (default 200)")
 
     parser.add_argument("--poll-interval", type=float, default=0.5,
                          help="Seconds between snapshots while watching for motion (default 0.5)")
@@ -272,6 +276,7 @@ def main():
                 prev, curr,
                 pixel_threshold=args.pixel_threshold,
                 min_motion_fraction=args.min_motion_fraction,
+                max_brightness=args.max_brightness,
             )
             prev = curr
 
